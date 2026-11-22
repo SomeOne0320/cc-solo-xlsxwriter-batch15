@@ -42,11 +42,9 @@ class TestWriteXdrcNvPr(unittest.TestCase):
 
         url = Url("https://test")
         url.tip = "tip"
-        url._rel_index = 1
 
         drawing_info = DrawingInfo()
-        drawing_info._tip = "tip"
-        drawing_info._rel_index = 1
+        drawing_info._url_rel_index = 1
         drawing_info._url = url
 
         self.drawing._write_c_nv_pr(2, drawing_info, "Chart 1")

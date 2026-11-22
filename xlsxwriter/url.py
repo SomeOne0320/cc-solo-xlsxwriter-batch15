@@ -44,7 +44,6 @@ class Url:
         self._tip: str = ""
         self._anchor: str = ""
         self._is_object_link: bool = False
-        self._rel_index: int = 0
 
         self._parse_url()
 
@@ -72,7 +71,6 @@ class Url:
             f"  _tip               = {self._tip}\n"
             f"  _anchor            = {self._anchor}\n"
             f"  _is_object_link    = {self._is_object_link}\n"
-            f"  _rel_index         = {self._rel_index}\n"
         )
 
     @classmethod

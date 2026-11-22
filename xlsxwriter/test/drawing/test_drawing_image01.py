@@ -102,7 +102,6 @@ class TestAssembleDrawing(unittest.TestCase):
 
         url = Url("https://test")
         url.tip = "this is a tooltip"
-        url._rel_index = 1
 
         fh = StringIO()
         drawing = Drawing()
@@ -121,6 +120,7 @@ class TestAssembleDrawing(unittest.TestCase):
         drawing_object._shape = None
         drawing_object._anchor = 2
         drawing_object._rel_index = 2
+        drawing_object._url_rel_index = 1
         drawing_object._url = url
 
         drawing._add_drawing_object(drawing_object)

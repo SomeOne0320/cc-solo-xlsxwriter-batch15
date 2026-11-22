@@ -5601,15 +5601,7 @@ class Worksheet(xmlwriter.XMLwriter):
             drawing_object._description = image.description
 
         if image._url:
-            url = image._url
-            target = url._target()
-            target_mode = url._target_mode()
-
-            if not self.drawing_rels.get(url._link):
-                self.drawing_links.append(["/hyperlink", target, target_mode])
-
-            url._rel_index = self._get_drawing_rel_index(url._link)
-            drawing_object._url = url
+            self._prepare_drawing_hyperlink(image._url, drawing_object)
 
         if not self.drawing_rels.get(image._digest):
             self.drawing_links.append(
@@ -5680,16 +5672,25 @@ class Worksheet(xmlwriter.XMLwriter):
 
         url = Url.from_options(options)
         if url:
-            target = url._target()
-            target_mode = url._target_mode()
-
-            if not self.drawing_rels.get(url._link):
-                self.drawing_links.append(["/hyperlink", target, target_mode])
-
-            url._rel_index = self._get_drawing_rel_index(url._link)
-            drawing_object._url = url
+            self._prepare_drawing_hyperlink(url, drawing_object)
 
         drawing._add_drawing_object(drawing_object)
+
+    def _prepare_drawing_hyperlink(
+        self, url: Url, drawing_object: DrawingInfo
+    ) -> None:
+        # Register a hyperlink for an image or shape drawing object. The
+        # relationship belongs to this placement of the object so the caller's
+        # Url object isn't modified and can be reused on other worksheets or in
+        # cell hyperlinks.
+        target = url._target()
+        target_mode = url._target_mode()
+
+        if not self.drawing_rels.get(url._link):
+            self.drawing_links.append(["/hyperlink", target, target_mode])
+
+        drawing_object._url_rel_index = self._get_drawing_rel_index(url._link)
+        drawing_object._url = url
 
     def _prepare_header_image(self, image_id, image) -> None:
         # Set up an image without a drawing object for header/footer images.

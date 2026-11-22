@@ -2,6 +2,13 @@
 Release 3.3.4 - Month XX 2026
 -----------------------------
 
+* Fixed issue where a hyperlink object shared between images or textboxes on
+  different worksheets could be written with a relationship id from another
+  worksheet's drawing. The drawing hyperlink registration for images and
+  textboxes is now handled by a single internal method and the relationship
+  id is stored on the drawing placement instead of the caller's link object,
+  so the object can be reused unchanged.
+
 * Fixed issue where datetimes on 1900-02-28 with a time after midnight were
   written as 1900-02-29.
 

@@ -45,6 +45,7 @@ class DrawingInfo:
         self._anchor = None
         self._url = None
         self._rel_index = 0
+        self._url_rel_index = 0
         self._name = None
         self._description = None
         self._decorative = False
@@ -318,7 +319,7 @@ class Drawing(xmlwriter.XMLwriter):
             self._xml_start_tag("xdr:cNvPr", attributes)
 
             if drawing._url:
-                self._write_a_hlink_click(drawing._url)
+                self._write_a_hlink_click(drawing._url_rel_index, drawing._url)
 
             if drawing._decorative:
                 self._write_decorative()
@@ -371,14 +372,14 @@ class Drawing(xmlwriter.XMLwriter):
 
         self._xml_empty_tag("a16:creationId", attributes)
 
-    def _write_a_hlink_click(self, url: Url) -> None:
+    def _write_a_hlink_click(self, rel_index: int, url: Url) -> None:
         # Write the <a:hlinkClick> element.
         schema = "http://schemas.openxmlformats.org/officeDocument/"
         xmlns_r = schema + "2006/relationships"
 
         attributes = [
             ("xmlns:r", xmlns_r),
-            ("r:id", "rId" + str(url._rel_index)),
+            ("r:id", "rId" + str(rel_index)),
         ]
 
         if url._tip:
