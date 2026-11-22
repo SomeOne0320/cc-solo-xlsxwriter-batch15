@@ -9,10 +9,10 @@
 
 # Standard packages.
 import os
-import stat
 import tempfile
-from io import BytesIO, StringIO
-from shutil import copy
+from io import BytesIO, StringIO, TextIOWrapper
+from shutil import copyfileobj
+from zipfile import ZipInfo
 
 # Package imports.
 from xlsxwriter.app import App
@@ -94,6 +94,8 @@ class Packager:
 
         self.tmpdir = ""
         self.in_memory = False
+        self.zip_file = None
+        self.allow_zip64 = False
         self.workbook = None
         self.worksheet_count = 0
         self.chartsheet_count = 0
@@ -120,6 +122,16 @@ class Packager:
     def _set_in_memory(self, in_memory) -> None:
         # Set the optional 'in_memory' mode.
         self.in_memory = in_memory
+
+    def _set_zip_file(self, zip_file) -> None:
+        # Set an open zip file to write the XML parts directly into. This
+        # avoids the intermediate temp files used by the default mode.
+        self.zip_file = zip_file
+
+    def _set_zip64(self, allow_zip64) -> None:
+        # Set the ZIP64 mode for streamed parts whose size isn't known in
+        # advance.
+        self.allow_zip64 = allow_zip64
 
     def _add_workbook(self, workbook) -> None:
         # Add the Excel::Writer::XLSX::Workbook object to the package.
@@ -175,17 +187,54 @@ class Packager:
         return self.filenames
 
     def _filename(self, xml_filename):
-        # Create a temp filename to write the XML data to and store the Excel
-        # filename to use as the name in the Zip container.
+        # An XML part is written directly into the Zip container, bypassing
+        # an intermediate temp file. Fall back to the older temp file/stream
+        # protocol if no Zip container has been supplied.
+        if self.zip_file is None:
+            if self.in_memory:
+                os_filename = StringIO()
+            else:
+                fd, os_filename = tempfile.mkstemp(dir=self.tmpdir)
+                os.close(fd)
+
+            self.filenames.append((os_filename, xml_filename, False))
+
+            return os_filename
+
+        zinfo = self._zip_info(xml_filename)
+
+        return TextIOWrapper(
+            self.zip_file.open(zinfo, "w", force_zip64=self.allow_zip64),
+            encoding="utf-8",
+            newline="",
+        )
+
+    def _binary_filename(self, xml_filename):
+        # Create a binary stream for a part, such as an image, that writes
+        # directly into the Zip container.
+        zinfo = self._zip_info(xml_filename)
+
+        return self.zip_file.open(zinfo, "w", force_zip64=self.allow_zip64)
+
+    def _zip_info(self, xml_filename):
+        # Create the ZipInfo for a part with a fixed timestamp.
+        # Normalize the archive name in the same way as ZipFile.write().
+        xml_filename = os.path.normpath(os.path.splitdrive(xml_filename)[1])
+        while xml_filename and xml_filename[0] in (os.sep, os.altsep):
+            xml_filename = xml_filename[1:]
+
         if self.in_memory:
-            os_filename = StringIO()
+            # Excel's timestamp of 1/1/1980.
+            date_time = (1980, 1, 1, 0, 0, 0)
         else:
-            fd, os_filename = tempfile.mkstemp(dir=self.tmpdir)
-            os.close(fd)
+            # 31/1/1980 due to portability issues setting it to Excel's
+            # timestamp of 1/1/1980.
+            date_time = (1980, 1, 31, 0, 0, 0)
 
-        self.filenames.append((os_filename, xml_filename, False))
+        zinfo = ZipInfo(xml_filename, date_time)
+        zinfo.compress_type = self.zip_file.compression
 
-        return os_filename
+        return zinfo
 
     def _write_workbook_file(self) -> None:
         # Write the workbook.xml file.
@@ -817,8 +866,28 @@ class Packager:
 
         rels._assemble_xml_file()
 
+    def _add_binary_file(self, xml_filename, write_data) -> None:
+        # Write a binary part, such as an image or VBA project, via the
+        # write_data() callback. It is written directly into the Zip container
+        # if one was supplied, otherwise the older temp file/stream protocol
+        # is used.
+        if self.zip_file is not None:
+            with self._binary_filename(xml_filename) as os_file:
+                write_data(os_file)
+            return
+
+        if self.in_memory:
+            # For in-memory mode we read the data into a stream.
+            os_filename = BytesIO()
+            write_data(os_filename)
+            self.filenames.append((os_filename, xml_filename, True))
+        else:
+            # In file mode we write or copy the data to a temp file.
+            os_filename = self._filename(xml_filename)
+            with open(os_filename, mode="wb") as os_file:
+                write_data(os_file)
+
     def _add_image_files(self) -> None:
-        # pylint: disable=consider-using-with
         # Write the /xl/media/image?.xml files.
         workbook = self.workbook
         index = 1
@@ -830,40 +899,23 @@ class Packager:
                 "xl/media/image" + str(index) + "." + image._image_extension
             )
 
-            if not self.in_memory:
-                # In file mode we just write or copy the image file.
-                os_filename = self._filename(xml_image_name)
+            if image.image_data:
+                # The data is in a byte stream.
+                data = image.image_data.getvalue()
 
-                if image.image_data:
-                    # The data is in a byte stream. Write it to the target.
-                    with open(os_filename, mode="wb") as os_file:
-                        os_file.write(image.image_data.getvalue())
-                else:
-                    copy(image.filename, os_filename)
+                def write_data(os_file, data=data):
+                    os_file.write(data)
 
-                    # Allow copies of Windows read-only images to be deleted.
-                    try:
-                        os.chmod(
-                            os_filename, os.stat(os_filename).st_mode | stat.S_IWRITE
-                        )
-                    except OSError:
-                        pass
             else:
-                # For in-memory mode we read the image into a stream.
-                if image.image_data:
-                    # The data is already in a byte stream.
-                    os_filename = image.image_data
-                else:
+
+                def write_data(os_file, image=image):
                     with open(image.filename, mode="rb") as image_file:
-                        image_data = image_file.read()
-                    os_filename = BytesIO(image_data)
+                        copyfileobj(image_file, os_file)
 
-                self.filenames.append((os_filename, xml_image_name, True))
-
+            self._add_binary_file(xml_image_name, write_data)
             index += 1
 
     def _add_vba_project_signature(self) -> None:
-        # pylint: disable=consider-using-with
         # Copy in a vbaProjectSignature.bin file.
         vba_project_signature = self.workbook.vba_project_signature
         vba_project_signature_is_stream = self.workbook.vba_project_signature_is_stream
@@ -871,33 +923,22 @@ class Packager:
         if not vba_project_signature:
             return
 
-        xml_vba_signature_name = "xl/vbaProjectSignature.bin"
+        if vba_project_signature_is_stream:
+            # The data is in a byte stream.
+            data = vba_project_signature.getvalue()
 
-        if not self.in_memory:
-            # In file mode we just write or copy the VBA project signature file.
-            os_filename = self._filename(xml_vba_signature_name)
-
-            if vba_project_signature_is_stream:
-                # The data is in a byte stream. Write it to the target.
-                with open(os_filename, mode="wb") as os_file:
-                    os_file.write(vba_project_signature.getvalue())
-            else:
-                copy(vba_project_signature, os_filename)
+            def write_data(os_file, data=data):
+                os_file.write(data)
 
         else:
-            # For in-memory mode we read the vba into a stream.
-            if vba_project_signature_is_stream:
-                # The data is already in a byte stream.
-                os_filename = vba_project_signature
-            else:
-                with open(vba_project_signature, mode="rb") as vba_file:
-                    vba_data = vba_file.read()
-                os_filename = BytesIO(vba_data)
 
-            self.filenames.append((os_filename, xml_vba_signature_name, True))
+            def write_data(os_file):
+                with open(vba_project_signature, mode="rb") as vba_file:
+                    copyfileobj(vba_file, os_file)
+
+        self._add_binary_file("xl/vbaProjectSignature.bin", write_data)
 
     def _add_vba_project(self) -> None:
-        # pylint: disable=consider-using-with
         # Copy in a vbaProject.bin file.
         vba_project = self.workbook.vba_project
         vba_project_is_stream = self.workbook.vba_project_is_stream
@@ -905,27 +946,17 @@ class Packager:
         if not vba_project:
             return
 
-        xml_vba_name = "xl/vbaProject.bin"
+        if vba_project_is_stream:
+            # The data is in a byte stream.
+            data = vba_project.getvalue()
 
-        if not self.in_memory:
-            # In file mode we just write or copy the VBA file.
-            os_filename = self._filename(xml_vba_name)
-
-            if vba_project_is_stream:
-                # The data is in a byte stream. Write it to the target.
-                with open(os_filename, mode="wb") as os_file:
-                    os_file.write(vba_project.getvalue())
-            else:
-                copy(vba_project, os_filename)
+            def write_data(os_file, data=data):
+                os_file.write(data)
 
         else:
-            # For in-memory mode we read the vba into a stream.
-            if vba_project_is_stream:
-                # The data is already in a byte stream.
-                os_filename = vba_project
-            else:
-                with open(vba_project, mode="rb") as vba_file:
-                    vba_data = vba_file.read()
-                os_filename = BytesIO(vba_data)
 
-            self.filenames.append((os_filename, xml_vba_name, True))
+            def write_data(os_file):
+                with open(vba_project, mode="rb") as vba_file:
+                    copyfileobj(vba_file, os_file)
+
+        self._add_binary_file("xl/vbaProject.bin", write_data)

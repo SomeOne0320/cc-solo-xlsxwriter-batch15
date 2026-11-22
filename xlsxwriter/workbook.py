@@ -897,16 +897,24 @@ class Workbook(xmlwriter.XMLwriter):
         # Prepare the metadata file links.
         self._prepare_metadata()
 
-        # Package the workbook.
+        # Package the workbook. The XML and binary parts are written directly
+        # into the Zip container, without intermediate temporary files, unless
+        # the packager is overridden with one that doesn't support streaming.
         packager._add_workbook(self)
         packager._set_tmpdir(self.tmpdir)
         packager._set_in_memory(self.in_memory)
+        if hasattr(packager, "_set_zip_file"):
+            packager._set_zip_file(xlsx_file)
+            if hasattr(packager, "_set_zip64"):
+                packager._set_zip64(self.allow_zip64)
         xml_files = packager._create_package()
 
         # Free up the Packager object.
         packager = None
 
-        # Add XML sub-files to the Zip file with their Excel filename.
+        # Add any remaining sub-files to the Zip file with their Excel filename.
+        # A packager that writes directly into the Zip container will return an
+        # empty list here.
         for file_id, file_data in enumerate(xml_files):
             os_filename, xml_filename, is_binary = file_data
 

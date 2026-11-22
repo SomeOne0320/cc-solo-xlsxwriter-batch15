@@ -2,6 +2,11 @@
 Release 3.3.4 - Month XX 2026
 -----------------------------
 
+* Improved the performance of the normal (non ``constant_memory``) save path.
+  The XML parts and binary parts such as images are now written directly into
+  the final zip file instead of first being written to intermediate temporary
+  files and then read back again to be compressed.
+
 * Fixed issue where datetimes on 1900-02-28 with a time after midnight were
   written as 1900-02-29.
 

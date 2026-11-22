@@ -99,5 +99,11 @@ constant:
 In ``constant_memory`` mode the performance should be approximately the same
 as normal mode.
 
+In normal mode the worksheet and other XML parts are written directly into the
+final zip file as they are assembled, so the save phase doesn't create
+intermediate temporary files or read them back again. In ``constant_memory``
+mode the flushed row data is held in temporary files and copied into the zip
+file when the workbook is saved.
+
 These figures were generated using programs in the ``dev/performance``
 directory of the XlsxWriter repo.

@@ -53,15 +53,20 @@ The constructor options are:
 
   See :ref:`memory_perf` for more details.
 
-* **tmpdir**: ``XlsxWriter`` stores workbook data in temporary files prior
-  to assembling the final XLSX file. The temporary files are created in the
-  system's temp directory. If the default temporary directory isn't accessible
-  to your application, or doesn't contain enough space, you can specify an
-  alternative location using the ``tmpdir`` option::
+* **tmpdir**: ``XlsxWriter`` stores row data in temporary files in
+  ``constant_memory`` mode prior to assembling the final XLSX file. The
+  temporary files are created in the system's temp directory. If the default
+  temporary directory isn't accessible to your application, or doesn't contain
+  enough space, you can specify an alternative location using the ``tmpdir``
+  option::
 
        workbook = xlsxwriter.Workbook(filename, {'tmpdir': '/home/user/tmp'})
 
   The temporary directory must exist and will not be created.
+
+  In the normal (non ``constant_memory``) mode the XML parts are written
+  directly into the final XLSX zip file and intermediate temporary files
+  aren't used.
 
 * **in_memory**: To avoid the use of temporary files in the assembly of the
   final XLSX file, for example on servers that don't allow temp files, set the
@@ -69,7 +74,9 @@ The constructor options are:
 
        workbook = xlsxwriter.Workbook(filename, {'in_memory': True})
 
-  This option overrides the ``constant_memory`` option.
+  This option overrides the ``constant_memory`` option. Note that the normal
+  save mode already streams the XML parts directly into the zip file, so this
+  option is mainly required for ``constant_memory`` mode.
 
   .. Note::
      This option used to be the recommended way of deploying XlsxWriter on

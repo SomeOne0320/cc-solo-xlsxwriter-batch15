@@ -52,6 +52,11 @@ class Theme:
         if isinstance(filename, StringIO):
             self.internal_fh = False
             self.fh = filename
+        elif hasattr(filename, "write"):
+            # An already open stream, such as a zip entry. The writer owns it
+            # and will close it when the XML file has been assembled.
+            self.internal_fh = True
+            self.fh = filename
         else:
             self.internal_fh = True
             # pylint: disable=consider-using-with
