@@ -1672,6 +1672,14 @@ class Workbook(xmlwriter.XMLwriter):
         for worksheet in self.worksheets():
             worksheets[worksheet.name] = worksheet
 
+        # In constant_memory mode each worksheet only retains its final row in
+        # the table; earlier rows have been spilled to a chart data temp file.
+        # Spill the pending final row as well so chart range lookups cover all
+        # the written data without reloading a full worksheet table.
+        for worksheet in self.worksheets():
+            if worksheet.constant_memory:
+                worksheet._flush_chart_row_data()
+
         # Build a list of the worksheet charts including any combined charts.
         for chart in self.charts:
             charts.append(chart)
@@ -1705,10 +1713,39 @@ class Workbook(xmlwriter.XMLwriter):
 
                 # Handle non-contiguous ranges like:
                 #     (Sheet1!$A$1:$A$2,Sheet1!$A$4:$A$5).
-                # We don't try to parse them. We just return an empty list.
-                if sheetname.startswith("("):
-                    chart.formula_data[r_id] = []
-                    seen_ranges[c_range] = []
+                # Parse each sub-range and join the data in the order that
+                # the ranges appear in the formula.
+                if c_range.startswith("("):
+                    sub_ranges = self._get_chart_range_list(c_range)
+
+                    if sub_ranges is None:
+                        chart.formula_data[r_id] = []
+                        seen_ranges[c_range] = []
+                        continue
+
+                    data = []
+                    unknown_sheet = ""
+                    for sub_sheetname, sub_cells in sub_ranges:
+                        if sub_sheetname not in worksheets:
+                            unknown_sheet = sub_sheetname
+                            break
+                        sub_worksheet = worksheets[sub_sheetname]
+                        data.extend(
+                            sub_worksheet._get_range_data(*sub_cells)
+                        )
+
+                    if unknown_sheet:
+                        warn(
+                            f"Unknown worksheet reference "
+                            f"'{unknown_sheet}' in range '{c_range}' "
+                            f"passed to add_series()"
+                        )
+                        chart.formula_data[r_id] = []
+                        seen_ranges[c_range] = []
+                        continue
+
+                    chart.formula_data[r_id] = data
+                    seen_ranges[c_range] = data
                     continue
 
                 # Warn if the name is unknown since it indicates a user error
@@ -1733,6 +1770,30 @@ class Workbook(xmlwriter.XMLwriter):
 
                 # Store range data locally to avoid lookup if seen again.
                 seen_ranges[c_range] = data
+
+    def _get_chart_range_list(self, c_range):
+        # Convert a non-contiguous range formula such as:
+        #     (Sheet1!$A$1:$A$2,Sheet1!$A$4:$A$5)
+        # into a list of sheet name and cell range tuples such as:
+        #     [('Sheet1', [0, 0, 1, 0]), ('Sheet1', [0, 0, 3, 0])]
+        # Return None if any of the sub-ranges can't be parsed.
+
+        # Strip the surrounding parentheses and split into sub-ranges.
+        range_parts = c_range[1:-1].split(",")
+
+        sub_ranges = []
+        for range_part in range_parts:
+            with warnings.catch_warnings():
+                # Ignore warning for non-cell ranges like defined names.
+                warnings.simplefilter("ignore")
+                sheetname, cells = self._get_chart_range(range_part)
+
+            if sheetname is None:
+                return None
+
+            sub_ranges.append((sheetname, cells))
+
+        return sub_ranges
 
     def _get_chart_range(self, c_range):
         # Convert a range formula such as Sheet1!$B$1:$B$5 into a sheet name

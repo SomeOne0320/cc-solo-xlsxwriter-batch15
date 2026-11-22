@@ -2,6 +2,15 @@
 Release 3.3.4 - Month XX 2026
 -----------------------------
 
+* Added chart ``numCache``/``strCache`` preview data when a workbook is
+  written in ``constant_memory`` mode. Previously the chart formula references
+  were written but the cached data used by applications that don't recalculate
+  charts on load was empty. The cell values are streamed to a temporary file
+  as each detail row is written and released, so the full worksheet table is
+  never reloaded into memory. The generated chart XML, including non-contiguous
+  ranges and explicitly supplied ``*_data`` values, is identical to the normal
+  (non ``constant_memory``) mode output.
+
 * Fixed issue where datetimes on 1900-02-28 with a time after midnight were
   written as 1900-02-29.
 

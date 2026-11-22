@@ -11,6 +11,7 @@
 
 # Standard packages.
 import datetime
+import json
 import math
 import os
 import re
@@ -667,6 +668,16 @@ class Worksheet(xmlwriter.XMLwriter):
         self.row_data_filename = None
         self.row_data_fh = None
         self.row_data_fh_closed = False
+
+        # Temp file and filehandle used to store chart range data in
+        # constant_memory mode so that it can be retrieved as chart cached
+        # data without keeping the full worksheet table in memory.
+        self.chart_data_filename = None
+        self.chart_data_fh = None
+        # Row number pre-spilled for chart lookups, or -1 when none. Guards
+        # against the same final row being spilled twice (once before the
+        # package is written and again when the packager flushes it).
+        self.chart_data_pending_row = -1
 
         self.vertical_dpi = 0
         self.horizontal_dpi = 0
@@ -5156,6 +5167,22 @@ class Worksheet(xmlwriter.XMLwriter):
             # Set as the worksheet filehandle until the file is assembled.
             self.fh = self.row_data_fh
 
+            # Open a second temp file to store the cell values that are
+            # written (and then discarded) in constant_memory mode. This data
+            # is used to populate the numCache/strCache data in chart ranges
+            # without reloading the full worksheet table into memory. It is
+            # opened in append mode so range lookups (which rewind the file)
+            # don't cause later rows to overwrite earlier records.
+            fd, filename = tempfile.mkstemp(dir=self.tmpdir)
+            os.close(fd)
+            self.chart_data_filename = filename
+            # pylint: disable=consider-using-with
+            self.chart_data_fh = open(  # noqa: SIM115
+                filename, mode="a+", encoding="utf-8"
+            )
+            # No row has been pre-spilled for chart lookups yet.
+            self.chart_data_pending_row = -1
+
     def _assemble_xml_file(self) -> None:
         # Assemble and write the XML file.
 
@@ -6222,7 +6249,13 @@ class Worksheet(xmlwriter.XMLwriter):
         # Excel can chart have series with data missing.
 
         if self.constant_memory:
-            return ()
+            # In constant_memory mode the worksheet table only holds a single
+            # row at a time. The cell values are instead streamed from the
+            # chart data temp file as they were written, without reloading the
+            # full worksheet table back into memory.
+            return self._get_spilled_range_data(
+                row_start, col_start, row_end, col_end
+            )
 
         data = []
 
@@ -6267,6 +6300,184 @@ class Worksheet(xmlwriter.XMLwriter):
                     data.append(None)
 
         return data
+
+    def _store_chart_row_data(self, row_num) -> None:
+        # Store the cell values of a flushed row in the chart data temp file
+        # so that chart numCache/strCache data can be generated in
+        # constant_memory mode. Every written row is recorded, including rows
+        # that only contain uncharted cell types (stored as an empty record),
+        # so range lookups can reproduce the same point positions as the
+        # normal (non constant_memory) mode. Each line is a JSON encoded
+        # [row_num, {col_num: value}] record.
+
+        if not self.constant_memory:
+            return
+
+        if self.chart_data_fh is None or self.chart_data_fh.closed:
+            return
+
+        row_cells = self.table.get(row_num)
+        if not row_cells:
+            return
+
+        row_data = {}
+        for col_num, cell in row_cells.items():
+            uncharted, value = self._get_chart_cell_value(cell)
+            if uncharted:
+                # The cell exists but its type isn't charted; record a marker
+                # so the read can omit it without shifting later points. A
+                # real cell value can never be this 1-element list.
+                row_data[col_num] = [None]
+            elif value is not None:
+                row_data[col_num] = value
+
+        record = [row_num, row_data]
+        self.chart_data_fh.write(json.dumps(record, ensure_ascii=False))
+        self.chart_data_fh.write("\n")
+
+    def _get_chart_cell_value(self, cell):
+        # Convert a worksheet cell tuple into the (uncharted, value) pair used
+        # for chart cached data. This mirrors _get_range_data() in normal mode.
+        # When uncharted is True the cell type produces no cache point.
+
+        cell_type = cell.__class__.__name__
+
+        if cell_type in ("Number", "Datetime"):
+            # Store a number with Excel's precision.
+            return False, f"{cell.number:.16g}"
+
+        if cell_type == "String":
+            # In constant_memory mode the string is stored directly rather
+            # than as a shared string index.
+            return False, cell.string
+
+        if cell_type in ("Formula", "ArrayFormula"):
+            # Store the pre-calculated formula result.
+            value = cell.value
+            if value is None:
+                value = 0
+            return False, value
+
+        if cell_type == "Blank":
+            # Store an empty cell, matching _get_range_data() which returns
+            # an empty string for Blank cells.
+            return False, ""
+
+        # Other cell types (Boolean, Error, RichString) aren't charted by
+        # _get_range_data() in normal mode either.
+        return True, None
+
+    def _get_spilled_range_data(self, row_start, col_start, row_end, col_end):
+        # Read a 1D range of chart data from the chart data temp file. The
+        # file is streamed one record at a time so the worksheet cell values
+        # are never accumulated in memory (only the chart points for the
+        # requested range are returned). This mirrors _get_range_data() in
+        # normal mode:
+        #   * A row that was never written contributes a single None, matching
+        #     the "row_num not in self.table" branch.
+        #   * A written row contributes one value per requested column; an
+        #     uncharted or missing cell yields None so later values keep their
+        #     original position in the range.
+
+        data = []
+
+        # Stream the spilled records; unwritten rows are yielded with an empty
+        # cell dict so the whole range is covered in row order.
+        for row_num, row_data in self._iter_spilled_rows(row_start, row_end):
+            if not row_data:
+                # An unwritten row contributes a single None, matching the
+                # "row_num not in self.table" branch of _get_range_data().
+                data.append(None)
+                continue
+
+            for col_num in range(col_start, col_end + 1):
+                key = str(col_num)
+                if key not in row_data:
+                    # Missing cell: append None to keep the point position,
+                    # matching the "col_num not in table[row]" branch.
+                    data.append(None)
+                elif isinstance(row_data[key], list):
+                    # An uncharted cell type (Boolean, Error, ...) produces no
+                    # cache point at all, matching _get_range_data().
+                    continue
+                else:
+                    data.append(row_data[key])
+
+        # Rewind the filehandle so subsequent range lookups start at the top.
+        self.chart_data_fh.seek(0)
+
+        return data
+
+    def _iter_spilled_rows(self, row_start, row_end):
+        # Yield (row_num, row_data) for every row in the requested range,
+        # streaming the chart data temp file. Unwritten rows are yielded with
+        # an empty cell dict so callers can apply the normal-mode position
+        # rules. The records are stored in write order, and constant_memory
+        # mode only permits sequential rows, so the on-disk order already
+        # matches the worksheet row order.
+
+        next_row = row_start
+        self.chart_data_fh.seek(0)
+
+        for line in self.chart_data_fh:
+            if not line.strip():
+                continue
+
+            row_num, row_data = json.loads(line)
+
+            if row_num < row_start:
+                continue
+            if row_num > row_end:
+                break
+
+            # Emit any unwritten rows that precede this written row.
+            while next_row < row_num:
+                yield next_row, {}
+                next_row += 1
+
+            yield row_num, row_data
+            next_row = row_num + 1
+
+        # Emit any trailing unwritten rows.
+        while next_row <= row_end:
+            yield next_row, {}
+            next_row += 1
+
+    def _flush_chart_row_data(self) -> None:
+        # In constant_memory mode the final row of written data is still held
+        # in the worksheet table when the workbook starts generating chart
+        # cached data (it isn't flushed to the row data temp file until the
+        # packager runs). Spill that pending row into the chart data temp file
+        # so chart range lookups can include it, without clearing the table.
+
+        if not self.constant_memory:
+            return
+
+        if self.chart_data_fh is None or self.chart_data_fh.closed:
+            return
+
+        row_num = self.previous_row
+        if row_num in self.table and self.table[row_num]:
+            # Record that this row has been spilled early so the packager's
+            # later _write_single_row() call doesn't write it a second time.
+            self.chart_data_pending_row = row_num
+            self._store_chart_row_data(row_num)
+            self.chart_data_fh.flush()
+
+    def _close_chart_data_file(self) -> None:
+        # Close and remove the chart data temp file used in constant_memory
+        # mode. Called once the chart cached data has been generated.
+
+        if self.chart_data_fh is not None and not self.chart_data_fh.closed:
+            self.chart_data_fh.close()
+
+        if self.chart_data_filename is not None and os.path.exists(
+            self.chart_data_filename
+        ):
+            os.unlink(self.chart_data_filename)
+
+        self.chart_data_fh = None
+        self.chart_data_filename = None
 
     def _csv_join(self, *items):
         # Create a csv string for use with data validation formulas and lists.
@@ -6408,6 +6619,9 @@ class Worksheet(xmlwriter.XMLwriter):
         if not self.row_data_fh_closed:
             self.row_data_fh.close()
             self.row_data_fh_closed = True
+
+        # Close and remove the chart data temp file, if it is still open.
+        self._close_chart_data_file()
 
     def _opt_reopen(self) -> None:
         # Reopen the row data filehandle in constant_memory mode.
@@ -6981,6 +7195,14 @@ class Worksheet(xmlwriter.XMLwriter):
             else:
                 # Row attributes or comments only.
                 self._write_empty_row(row_num, span, self.row_info[row_num])
+
+        # Store the row cell values in the chart data temp file before the
+        # table is reset so that chart cached data can be generated later.
+        # Skip a row that was already pre-spilled for chart lookups.
+        if row_num != self.chart_data_pending_row:
+            self._store_chart_row_data(row_num)
+        else:
+            self.chart_data_pending_row = -1
 
         # Reset table.
         self.table.clear()
